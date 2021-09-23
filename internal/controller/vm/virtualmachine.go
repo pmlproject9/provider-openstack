@@ -14,11 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package mytype
+package vm
 
 import (
 	"context"
 	"fmt"
+	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
+	"github.com/gophercloud/gophercloud/pagination"
+	yaml "gopkg.in/yaml.v2"
+	"log"
 
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/types"
@@ -32,13 +36,14 @@ import (
 	"github.com/crossplane/crossplane-runtime/pkg/ratelimiter"
 	"github.com/crossplane/crossplane-runtime/pkg/reconciler/managed"
 	"github.com/crossplane/crossplane-runtime/pkg/resource"
-
-	"github.com/crossplane/provider-template/apis/sample/v1alpha1"
+	"github.com/crossplane/provider-template/apis/iaas/v1alpha1"
 	apisv1alpha1 "github.com/crossplane/provider-template/apis/v1alpha1"
+	"github.com/gophercloud/gophercloud"
+	"github.com/gophercloud/gophercloud/openstack"
 )
 
 const (
-	errNotMyType    = "managed resource is not a MyType custom resource"
+	errNotMyType    = "managed resource is not a VirtualMachine custom resource"
 	errTrackPCUsage = "cannot track ProviderConfig usage"
 	errGetPC        = "cannot get ProviderConfig"
 	errGetCreds     = "cannot get credentials"
@@ -46,34 +51,69 @@ const (
 	errNewClient = "cannot create new Service"
 )
 
-// A NoOpService does nothing.
-type NoOpService struct{}
+// A OpenstackClient does nothing.
+type OpenstackClient struct{}
+
+// for openstack download client config
+type OpenstackConfig struct {
+	Auth struct {
+		AuthUrl        string `yaml:"auth_url"`
+		Username       string `yaml:"username"`
+		Password       string `yaml:"password"`
+		ProjectID      string `yaml:"project_id"`
+		ProjectName    string `yaml:"project_name"`
+		UserDomainName string `yaml:"user_domain_name"`
+	}
+	RegionName string `yaml:"region_name"`
+	Interface  string `yaml:"interface"`
+	IdentityAPIVersion string `yaml:"identity_api_version"`
+}
+
 
 var (
-	newNoOpService = func(_ []byte) (interface{}, error) { return &NoOpService{}, nil }
+	newOpenstackClient = func(credentials []byte) (interface{}, error) {
+		openstackConfig := new(OpenstackConfig)
+		err := yaml.Unmarshal(credentials, &openstackConfig)
+		if err != nil {
+			return nil, err
+		}
+		options := gophercloud.AuthOptions{
+			Username:         openstackConfig.Auth.Username,
+			Password:         openstackConfig.Auth.Password,
+			DomainName:       openstackConfig.Auth.UserDomainName,
+			TenantName:       openstackConfig.Auth.ProjectName,
+			TenantID: openstackConfig.Auth.ProjectID,
+			IdentityEndpoint: openstackConfig.Auth.AuthUrl,
+		}
+		client, authError := openstack.AuthenticatedClient(options)
+		if authError != nil {
+			return nil, err
+		}
+		return client, nil
+	}
 )
 
-// Setup adds a controller that reconciles MyType managed resources.
+// Setup adds a controller that reconciles VirtualMachine managed resources.
 func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
-	name := managed.ControllerName(v1alpha1.MyTypeGroupKind)
+	name := managed.ControllerName(v1alpha1.VirtualMachineGroupKind)
 
 	o := controller.Options{
 		RateLimiter: ratelimiter.NewDefaultManagedRateLimiter(rl),
 	}
 
 	r := managed.NewReconciler(mgr,
-		resource.ManagedKind(v1alpha1.MyTypeGroupVersionKind),
+		resource.ManagedKind(v1alpha1.VirtualMachineGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
 			kube:         mgr.GetClient(),
 			usage:        resource.NewProviderConfigUsageTracker(mgr.GetClient(), &apisv1alpha1.ProviderConfigUsage{}),
-			newServiceFn: newNoOpService}),
+			newOpenstackFn: newOpenstackClient}),
 		managed.WithLogger(l.WithValues("controller", name)),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
 
 	return ctrl.NewControllerManagedBy(mgr).
 		Named(name).
 		WithOptions(o).
-		For(&v1alpha1.MyType{}).
+		For(&v1alpha1.VirtualMachine{}).
 		Complete(r)
 }
 
@@ -82,7 +122,7 @@ func Setup(mgr ctrl.Manager, l logging.Logger, rl workqueue.RateLimiter) error {
 type connector struct {
 	kube         client.Client
 	usage        resource.Tracker
-	newServiceFn func(creds []byte) (interface{}, error)
+	newOpenstackFn func(creds []byte) (interface{}, error)
 }
 
 // Connect typically produces an ExternalClient by:
@@ -91,7 +131,7 @@ type connector struct {
 // 3. Getting the credentials specified by the ProviderConfig.
 // 4. Using the credentials to form a client.
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return nil, errors.New(errNotMyType)
 	}
@@ -111,7 +151,7 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		return nil, errors.Wrap(err, errGetCreds)
 	}
 
-	svc, err := c.newServiceFn(data)
+	svc, err := c.newOpenstackFn(data)
 	if err != nil {
 		return nil, errors.Wrap(err, errNewClient)
 	}
@@ -128,24 +168,53 @@ type external struct {
 }
 
 func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return managed.ExternalObservation{}, errors.New(errNotMyType)
 	}
 
-	// These fmt statements should be removed in the real implementation.
-	fmt.Printf("Observing: %+v", cr)
+	// 3. server client
+	client, serverError := openstack.NewComputeV2((c.service).(*gophercloud.ProviderClient), gophercloud.EndpointOpts{
+		Region: "RegionOne",
+	})
+
+	if  serverError!=nil {
+		return managed.ExternalObservation{}, errors.New("can't get nova client")
+	}
+
+	// 4. servers ops
+	exactalName := fmt.Sprintf("^%s$", cr.Name)
+	opts := servers.ListOpts{Name: exactalName}
+
+	// Retrieve a pager (i.e. a paginated collection)
+	pager := servers.List(client, opts)
+
+	serverExisted := false
+	// page for fetch serverList
+	pager.EachPage(func(page pagination.Page) (bool, error) {
+		serverList, err := servers.ExtractServers(page)
+		if err != nil {
+			log.Println("some wrong:", err.Error())
+			return false, err
+		}
+		for _ = range serverList {
+			// means exist a server
+			serverExisted = true
+			return false, nil
+		}
+		return true, nil
+	})
 
 	return managed.ExternalObservation{
 		// Return false when the external resource does not exist. This lets
 		// the managed resource reconciler know that it needs to call Create to
 		// (re)create the resource, or that it has successfully been deleted.
-		ResourceExists: true,
+		ResourceExists: serverExisted,
 
 		// Return false when the external resource exists, but it not up to date
 		// with the desired managed resource state. This lets the managed
 		// resource reconciler know that it needs to call Update.
-		ResourceUpToDate: true,
+		ResourceUpToDate: false,
 
 		// Return any details that may be required to connect to the external
 		// resource. These will be stored as the connection secret.
@@ -154,27 +223,44 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 }
 
 func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	cr, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errNotMyType)
 	}
+	// 3. server client
+	client, _ := openstack.NewComputeV2((c.service).(*gophercloud.ProviderClient), gophercloud.EndpointOpts{
+		Region: "RegionOne",
+	})
 
-	fmt.Printf("Creating: %+v", cr)
+	// 4. servers ops
+	result, CreateError := servers.Create(client, servers.CreateOpts{
+		Name:      cr.Name,
+		ImageName:  "CentOS-8-GenericCloud-8.3.2011",
+		FlavorName: "hyperos-flavor",
+		Networks: []servers.Network{
+			{UUID: "246af0d1-6bcb-447d-b82a-eae1225e1aaa"},
+		},
+		ServiceClient: client,
+	}).Extract()
+
+	if CreateError != nil {
+		log.Println("Create vm error:", CreateError.Error())
+	}
 
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
+		ConnectionDetails: managed.ConnectionDetails{
+			"id": []byte(result.ID),
+		},
 	}, nil
 }
 
 func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	cr, ok := mg.(*v1alpha1.MyType)
+	_, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return managed.ExternalUpdate{}, errors.New(errNotMyType)
 	}
-
-	fmt.Printf("Updating: %+v", cr)
 
 	return managed.ExternalUpdate{
 		// Optionally return any details that may be required to connect to the
@@ -184,12 +270,12 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
-	cr, ok := mg.(*v1alpha1.MyType)
+	_, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return errors.New(errNotMyType)
 	}
 
-	fmt.Printf("Deleting: %+v", cr)
+	// 3. delete use id
 
 	return nil
 }

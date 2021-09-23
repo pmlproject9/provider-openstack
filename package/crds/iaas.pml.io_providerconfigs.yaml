@@ -4,9 +4,9 @@ metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.6.2
   creationTimestamp: null
-  name: providerconfigs.template.crossplane.io
+  name: providerconfigs.iaas.pml.io
 spec:
-  group: template.crossplane.io
+  group: iaas.pml.io
   names:
     kind: ProviderConfig
     listKind: ProviderConfigList
