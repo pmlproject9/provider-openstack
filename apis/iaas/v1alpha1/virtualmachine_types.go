@@ -28,7 +28,6 @@ import (
 // VirtualMachineParameters are the configurable fields of a VirtualMachine.
 type VirtualMachineParameters struct {
 	ConfigurableField string `json:"configurableField"`
-	ID string `json:"id, omitempty"`
 }
 
 // VirtualMachineObservation are the observable fields of a VirtualMachine.

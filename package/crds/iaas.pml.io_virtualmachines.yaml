@@ -63,8 +63,6 @@ spec:
                 properties:
                   configurableField:
                     type: string
-                  id:
-                    type: string
                 required:
                 - configurableField
                 type: object

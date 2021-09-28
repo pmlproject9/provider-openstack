@@ -19,6 +19,7 @@ package vm
 import (
 	"context"
 	"fmt"
+	"github.com/crossplane/crossplane-runtime/pkg/meta"
 	"github.com/gophercloud/gophercloud/openstack/compute/v2/servers"
 	"github.com/gophercloud/gophercloud/pagination"
 	yaml "gopkg.in/yaml.v2"
@@ -214,7 +215,7 @@ func (c *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		// Return false when the external resource exists, but it not up to date
 		// with the desired managed resource state. This lets the managed
 		// resource reconciler know that it needs to call Update.
-		ResourceUpToDate: false,
+		ResourceUpToDate: true,
 
 		// Return any details that may be required to connect to the external
 		// resource. These will be stored as the connection secret.
@@ -247,11 +248,15 @@ func (c *external) Create(ctx context.Context, mg resource.Managed) (managed.Ext
 		log.Println("Create vm error:", CreateError.Error())
 	}
 
+	anno := mg.GetAnnotations()
+	anno[meta.AnnotationKeyExternalName] = result.ID
+	mg.SetAnnotations(anno)
+
 	return managed.ExternalCreation{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
+		ExternalNameAssigned: true,
 		ConnectionDetails: managed.ConnectionDetails{
-			"id": []byte(result.ID),
 		},
 	}, nil
 }
@@ -265,17 +270,23 @@ func (c *external) Update(ctx context.Context, mg resource.Managed) (managed.Ext
 	return managed.ExternalUpdate{
 		// Optionally return any details that may be required to connect to the
 		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
+		ConnectionDetails: managed.ConnectionDetails{
+
+		},
 	}, nil
 }
 
 func (c *external) Delete(ctx context.Context, mg resource.Managed) error {
-	_, ok := mg.(*v1alpha1.VirtualMachine)
+	cr, ok := mg.(*v1alpha1.VirtualMachine)
 	if !ok {
 		return errors.New(errNotMyType)
 	}
 
-	// 3. delete use id
+	// 3. server client
+	client, _ := openstack.NewComputeV2((c.service).(*gophercloud.ProviderClient), gophercloud.EndpointOpts{
+		Region: "RegionOne",
+	})
 
-	return nil
+	// 4. servers ops
+	return servers.Delete(client, cr.GetAnnotations()[meta.AnnotationKeyExternalName]).ExtractErr()
 }
